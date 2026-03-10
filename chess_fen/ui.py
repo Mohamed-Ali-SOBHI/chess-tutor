@@ -6,7 +6,7 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 from .capture import capture_full_screen
-from .constants import DEFAULT_ENGINE_ELO
+from .constants import DEFAULT_ENGINE_ELO, DEFAULT_ENGINE_THINK_TIME
 from .engine import close_cached_engines
 from .service import _load_predictor, analyze_screen_image_and_suggest_move
 
@@ -64,9 +64,9 @@ class ChessAssistantApp:
         self.best_move_var = tk.StringVar(value="-")
         self.eval_var = tk.StringVar(value="-")
         self.metrics_var = tk.StringVar(value="-")
-        self.engine_var = tk.StringVar(value="Stockfish auto")
+        self.engine_var = tk.StringVar(value="Stockfish fort")
         self.runtime_var = tk.StringVar(value="Modele non charge")
-        self.system_var = tk.StringVar(value="Stockfish auto | Modele non charge")
+        self.system_var = tk.StringVar(value="Stockfish fort | Modele non charge")
         self.pin_var = tk.StringVar(value="Epinglee")
 
         self._configure_window()
@@ -517,7 +517,7 @@ class ChessAssistantApp:
 
     def _format_engine_message(self, engine_path, engine_elo):
         if not engine_path:
-            return "Stockfish auto"
+            return "Stockfish fort"
 
         engine_name = os.path.basename(engine_path) or "Stockfish"
         if engine_elo is None:
@@ -538,7 +538,7 @@ class ChessAssistantApp:
         )
 
     def _refresh_system_summary(self):
-        engine_text = (self.engine_var.get() or "").strip() or "Stockfish auto"
+        engine_text = (self.engine_var.get() or "").strip() or "Stockfish fort"
         runtime_text = (self.runtime_var.get() or "").strip() or "Modele non charge"
         self.system_var.set(f"{engine_text} | {runtime_text}")
 
@@ -652,7 +652,7 @@ class ChessAssistantApp:
         self.best_move_var.set("-")
         self.eval_var.set("-")
         self.metrics_var.set("-")
-        self.engine_var.set("Stockfish auto")
+        self.engine_var.set("Stockfish fort")
         if self.predictor is None:
             self.runtime_var.set("Modele non charge")
         self._refresh_system_summary()
@@ -688,7 +688,7 @@ class ChessAssistantApp:
                 screen_image,
                 stockfish_path=None,
                 side_to_move=self.side_to_move_var.get(),
-                think_time=0.20,
+                think_time=DEFAULT_ENGINE_THINK_TIME,
                 engine_elo=DEFAULT_ENGINE_ELO,
                 predictor=predictor,
                 use_filters=True,
@@ -697,7 +697,7 @@ class ChessAssistantApp:
                 engine_progress_callback=self._handle_engine_progress,
             )
 
-            engine_message = "Stockfish auto"
+            engine_message = "Stockfish fort"
             move_message = "Aucun coup"
             eval_message = "Aucune evaluation"
             final_status = "Analyse terminee."

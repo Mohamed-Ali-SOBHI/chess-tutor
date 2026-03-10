@@ -9,6 +9,7 @@ from chessimg2pos.model_loader import download_pretrained_model
 
 from .constants import (
     DEFAULT_ENGINE_ELO,
+    DEFAULT_ENGINE_THINK_TIME,
     EXCLUDED_IMAGE_DIRS,
     IGNORED_IMAGE_PREFIXES,
     IMAGE_EXTENSIONS,
@@ -258,7 +259,7 @@ def analyze_image_and_suggest_move(
     image_path,
     stockfish_path=None,
     side_to_move="w",
-    think_time=0.20,
+    think_time=DEFAULT_ENGINE_THINK_TIME,
     use_filters=True,
     engine_elo=DEFAULT_ENGINE_ELO,
     predictor=None,
@@ -285,7 +286,7 @@ def analyze_screen_image_and_suggest_move(
     screen_image,
     stockfish_path=None,
     side_to_move="w",
-    think_time=0.20,
+    think_time=DEFAULT_ENGINE_THINK_TIME,
     use_filters=True,
     engine_elo=DEFAULT_ENGINE_ELO,
     predictor=None,

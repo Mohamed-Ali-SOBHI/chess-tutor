@@ -7,7 +7,7 @@ try:
 except ImportError:
     chess = None
 
-from .constants import DEFAULT_ENGINE_ELO
+from .constants import DEFAULT_ENGINE_ELO, DEFAULT_ENGINE_THINK_TIME
 from .fen_utils import _to_full_fen
 from .stockfish_manager import (
     iter_existing_stockfish_paths,
@@ -155,7 +155,7 @@ def get_best_move_from_fen(
     fen,
     stockfish_path=None,
     side_to_move="w",
-    think_time=0.20,
+    think_time=DEFAULT_ENGINE_THINK_TIME,
     engine_elo=DEFAULT_ENGINE_ELO,
     auto_install=True,
     progress_callback=None,

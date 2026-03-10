@@ -1,6 +1,6 @@
 # Chess Screen Assistant
 
-Application Windows pour capturer ton ecran, detecter automatiquement un plateau d'echecs visible dans la capture, extraire le FEN et demander un meilleur coup a Stockfish limite a 2000 Elo.
+Application Windows pour capturer ton ecran, detecter automatiquement un plateau d'echecs visible dans la capture, extraire le FEN et demander un meilleur coup a Stockfish en mode fort par defaut.
 
 ## Apercu
 
@@ -86,7 +86,7 @@ Exemple PowerShell :
 $env:STOCKFISH_PATH="C:\chemin\vers\stockfish.exe"
 ```
 
-Le moteur est configure a `2000` Elo par defaut.
+Le moteur est configure sans limitation Elo par defaut, avec un temps de reflexion plus long pour des coups plus solides.
 
 ## Mode script
 

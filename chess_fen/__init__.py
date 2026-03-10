@@ -1,6 +1,7 @@
 from .constants import (
     DEBUG_IMAGE_ENV_VAR,
     DEFAULT_ENGINE_ELO,
+    DEFAULT_ENGINE_THINK_TIME,
     EXCLUDED_IMAGE_DIRS,
     IGNORED_IMAGE_PREFIXES,
     IMAGE_EXTENSIONS,
@@ -22,6 +23,7 @@ from .vision import detect_and_crop_board, detect_and_crop_board_from_image
 __all__ = [
     "DEBUG_IMAGE_ENV_VAR",
     "DEFAULT_ENGINE_ELO",
+    "DEFAULT_ENGINE_THINK_TIME",
     "EXCLUDED_IMAGE_DIRS",
     "IGNORED_IMAGE_PREFIXES",
     "IMAGE_EXTENSIONS",
