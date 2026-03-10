@@ -225,13 +225,12 @@ def _checkerboard_alignment_score(board_rgb):
 
 
 def _board_signature(board):
+    grayscale = cv2.cvtColor(board, cv2.COLOR_RGB2GRAY)
+    thumbnail = cv2.resize(grayscale, (16, 16), interpolation=cv2.INTER_AREA)
     return (
         board.shape[0],
         board.shape[1],
-        int(np.mean(board)),
-        int(np.std(board)),
-        int(board[0, 0, 0]),
-        int(board[-1, -1, 0]),
+        thumbnail.tobytes(),
     )
 
 

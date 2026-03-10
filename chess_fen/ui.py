@@ -5,6 +5,7 @@ from tkinter import filedialog, ttk
 
 from .capture import capture_full_screen
 from .constants import DEFAULT_ENGINE_ELO
+from .engine import close_cached_engines
 from .service import (
     _load_predictor,
     analyze_screen_image_and_suggest_move,
@@ -16,6 +17,7 @@ class ChessAssistantApp:
         self.root = root
         self.root.title("Chess Screen Assistant")
         self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.predictor = None
         self.is_busy = False
@@ -189,10 +191,12 @@ class ChessAssistantApp:
         self.root.after(0, _apply)
 
     def _handle_fen_progress(self, payload):
-        total = max(1, int(payload.get("total") or 1))
-        current = max(0, int(payload.get("current") or 0))
-        ratio = min(1.0, current / total)
-        progress_value = 20.0 + 65.0 * ratio
+        progress_value = payload.get("progress_percent")
+        if progress_value is None:
+            total = max(1, int(payload.get("total") or 1))
+            current = max(0, int(payload.get("current") or 0))
+            ratio = min(1.0, current / total)
+            progress_value = 20.0 + 65.0 * ratio
         message = payload.get("message") or "Analyse du FEN..."
         self._set_status(message)
         self._set_progress(progress_value)
@@ -208,13 +212,14 @@ class ChessAssistantApp:
         self.best_move_var.set("-")
         self.eval_var.set("-")
         self.engine_var.set("-")
-        self.runtime_var.set("-")
+        if self.predictor is None:
+            self.runtime_var.set("-")
         threading.Thread(target=self._run_analysis, daemon=True).start()
 
     def _ensure_predictor(self):
         if self.predictor is None:
             self._set_status("Chargement du modele de reconnaissance...")
-            self._set_progress(5.0)
+            self._set_progress(0.0)
             self.predictor = _load_predictor()
             runtime_label = getattr(
                 self.predictor,
@@ -228,10 +233,8 @@ class ChessAssistantApp:
         try:
             predictor = self._ensure_predictor()
             self._set_status("Capture de l'ecran en cours...")
-            self._set_progress(10.0)
             screen_image = capture_full_screen()
             self._set_status("Detection du plateau...")
-            self._set_progress(15.0)
             analysis = analyze_screen_image_and_suggest_move(
                 screen_image,
                 stockfish_path=self.stockfish_var.get().strip() or None,
@@ -253,6 +256,9 @@ class ChessAssistantApp:
             fen = analysis["fen"]
             is_reliable = bool(analysis.get("is_reliable"))
             if fen and is_reliable:
+                if analysis.get("phase_name") != "exhaustive":
+                    self._set_progress(95.0)
+                self._set_status("Calcul du meilleur coup...")
                 side_label = "Blancs" if analysis["side_to_move"] == "w" else "Noirs"
                 move_message = (
                     f"{side_label}: {analysis['best_move_san']} "
@@ -319,7 +325,8 @@ class ChessAssistantApp:
         self.best_move_var.set(move_message)
         self.eval_var.set(eval_message)
         self.metrics_var.set(
-            "qualite={quality} | confiance={confidence:.3f} | stabilite={stability} | fiable={reliable}".format(
+            "phase={phase} | qualite={quality} | confiance={confidence:.3f} | stabilite={stability} | fiable={reliable}".format(
+                phase=analysis.get("phase_name") or "-",
                 quality=analysis["quality_score"],
                 confidence=analysis["avg_confidence"],
                 stability=analysis["stability_count"],
@@ -337,6 +344,10 @@ class ChessAssistantApp:
         self.progress_var.set(0.0)
         self.progress_text_var.set("0%")
         self._set_busy(False)
+
+    def _on_close(self):
+        close_cached_engines()
+        self.root.destroy()
 
 
 def launch_desktop_app():

@@ -3,7 +3,14 @@ from typing import Dict
 
 import numpy as np
 
-from .batch_inference import predict_chessboard_batch
+from .batch_inference import predict_chessboard_batch_many
+from .constants import (
+    MIN_RELIABLE_CONFIDENCE,
+    MIN_RELIABLE_CONFIDENCE_WITH_STRONG_STABILITY,
+    MIN_RELIABLE_QUALITY,
+    MIN_RELIABLE_STABILITY,
+    MIN_RELIABLE_STRONG_STABILITY,
+)
 from .fen_utils import (
     _apply_fen_votes,
     _compress_fen_row,
@@ -25,13 +32,74 @@ from .occupancy import (
 )
 from .vision import _board_signature, _build_board_candidates, _square_center_crop
 
-MAX_PREDICTION_CROPS_PER_ROTATION = 8
+DEFAULT_TRIM_SPECS = (
+    (0.0, 0.0, 0.0, 0.0),
+    (0.01, 0.01, 0.01, 0.01),
+    (0.02, 0.02, 0.02, 0.02),
+    (0.04, 0.04, 0.04, 0.04),
+    (0.0, 0.0, 0.06, 0.0),
+    (0.0, 0.0, 0.08, 0.0),
+    (0.0, 0.0, 0.0, 0.06),
+    (0.02, 0.02, 0.06, 0.0),
+)
+QUICK_TRIM_SPECS = DEFAULT_TRIM_SPECS[:4]
+DEEP_TRIM_SPECS = DEFAULT_TRIM_SPECS[:4] + (
+    (0.0, 0.0, 0.06, 0.0),
+    (0.0, 0.0, 0.0, 0.06),
+)
+PHASE_SPECS = (
+    {
+        "name": "quick",
+        "label": "Analyse rapide...",
+        "complete_label": "Analyse rapide terminee.",
+        "progress_start": 0.0,
+        "progress_end": 45.0,
+        "use_filters": False,
+        "max_board_specs": 3,
+        "trim_specs": QUICK_TRIM_SPECS,
+    },
+    {
+        "name": "deep",
+        "label": "Verification approfondie...",
+        "complete_label": "Verification approfondie terminee.",
+        "progress_start": 45.0,
+        "progress_end": 80.0,
+        "use_filters": False,
+        "max_board_specs": 6,
+        "trim_specs": DEEP_TRIM_SPECS,
+    },
+    {
+        "name": "exhaustive",
+        "label": "Analyse exhaustive...",
+        "complete_label": "Analyse exhaustive terminee.",
+        "progress_start": 80.0,
+        "progress_end": 100.0,
+        "use_filters": True,
+        "max_board_specs": None,
+        "trim_specs": DEFAULT_TRIM_SPECS,
+    },
+)
+EXHAUSTIVE_ONLY_PHASE = (
+    {
+        "name": "exhaustive",
+        "label": "Analyse du FEN...",
+        "complete_label": "Analyse du FEN terminee.",
+        "progress_start": 0.0,
+        "progress_end": 100.0,
+        "use_filters": True,
+        "max_board_specs": None,
+        "trim_specs": DEFAULT_TRIM_SPECS,
+    },
+)
 LOCAL_REPAIR_MAX_PRIMARY_SQUARES = 4
 LOCAL_REPAIR_MAX_SECONDARY_SQUARES = 2
 LOCAL_REPAIR_MAX_CANDIDATES = 30
 LOCAL_REPAIR_MAX_EDITS = 2
 LOCAL_REPAIR_EDIT_PENALTY = 0.12
 LOW_CONFIDENCE_REPAIR_THRESHOLD = 0.92
+MIN_LOCAL_REPAIR_PLAUSIBILITY = 7
+DEEP_PHASE_STABILITY_SHORT_CIRCUIT = 5
+_MISSING = object()
 
 
 def _build_prediction_meta(quality_score, avg_confidence, stability_count, fallback_used):
@@ -41,6 +109,59 @@ def _build_prediction_meta(quality_score, avg_confidence, stability_count, fallb
         "stability_count": int(stability_count),
         "fallback_used": int(bool(fallback_used)),
     }
+
+
+def _meta_is_reliable(fen, meta):
+    fen = (fen or "").strip()
+    quality_score = int(meta.get("quality_score") or 0)
+    avg_confidence = float(meta.get("avg_confidence") or 0.0)
+    stability_count = int(meta.get("stability_count") or 0)
+    fallback_used = bool(meta.get("fallback_used"))
+
+    if not fen or fallback_used:
+        return False
+    if quality_score < MIN_RELIABLE_QUALITY:
+        return False
+    if stability_count < MIN_RELIABLE_STABILITY:
+        return False
+
+    meets_baseline_confidence = avg_confidence >= MIN_RELIABLE_CONFIDENCE
+    meets_strong_stability_confidence = (
+        stability_count >= MIN_RELIABLE_STRONG_STABILITY
+        and avg_confidence >= MIN_RELIABLE_CONFIDENCE_WITH_STRONG_STABILITY
+    )
+    return meets_baseline_confidence or meets_strong_stability_confidence
+
+
+def _progress_payload(phase_spec, current, total, message=None):
+    total = max(1, int(total or 1))
+    current = max(0, min(int(current or 0), total))
+    ratio = current / total
+    progress_percent = (
+        float(phase_spec["progress_start"])
+        + (float(phase_spec["progress_end"]) - float(phase_spec["progress_start"])) * ratio
+    )
+    return {
+        "stage": "fen_phase",
+        "phase_name": phase_spec["name"],
+        "message": message or phase_spec["label"],
+        "current": current,
+        "total": total,
+        "progress_percent": progress_percent,
+    }
+
+
+def _emit_progress(progress_callback, phase_spec, current, total, message=None):
+    if progress_callback is None:
+        return
+    progress_callback(_progress_payload(phase_spec, current, total, message=message))
+
+
+def _board_batch_materialization_size(predictor):
+    device_label = str(getattr(predictor, "device", "cpu")).lower()
+    if "cuda" in device_label:
+        return 16
+    return 8
 
 
 def _rotate_cell_candidates_k_ccw(cell_candidates, k):
@@ -124,6 +245,21 @@ def _resolve_last_rank_promotions(fen, cell_candidates):
     return fen
 
 
+def _normalize_candidate_fen(fen, cell_candidates):
+    fen = _resolve_last_rank_promotions(fen, cell_candidates)
+    return _fix_last_rank_pawns(fen)
+
+
+def _quick_gate_candidate_fen(fen, cell_candidates):
+    normalized_fen = _normalize_candidate_fen(fen, cell_candidates)
+    quality_score = _score_fen_plausibility(normalized_fen)
+    if quality_score < MIN_LOCAL_REPAIR_PLAUSIBILITY:
+        return None, quality_score
+    if not _is_valid_piece_placement(normalized_fen, side_to_move="w"):
+        return None, quality_score
+    return normalized_fen, quality_score
+
+
 def _score_candidate_fen_variant(
     fen,
     avg_confidence,
@@ -133,11 +269,18 @@ def _score_candidate_fen_variant(
     trim_amount,
     edit_count=0,
     cell_candidates=None,
+    quality_score=None,
 ):
     if cell_candidates is not None:
-        fen = _resolve_last_rank_promotions(fen, cell_candidates)
-    fen = _fix_last_rank_pawns(fen)
-    quality_score = _score_fen_plausibility(fen)
+        fen = _normalize_candidate_fen(fen, cell_candidates)
+    else:
+        fen = _fix_last_rank_pawns(fen)
+
+    quality_score = (
+        int(quality_score)
+        if quality_score is not None
+        else _score_fen_plausibility(fen)
+    )
     piece_count = _fen_piece_count(fen)
     occupancy_gap = abs(piece_count - estimated_occupancy)
     if not _is_valid_piece_placement(fen, side_to_move="w"):
@@ -330,45 +473,47 @@ def _generate_local_repair_evaluations(
     return evaluations
 
 
-def _generate_prediction_crops(board_rgb):
-    trim_specs = [
-        (0.0, 0.0, 0.0, 0.0),
-        (0.01, 0.01, 0.01, 0.01),
-        (0.02, 0.02, 0.02, 0.02),
-        (0.04, 0.04, 0.04, 0.04),
-        (0.0, 0.0, 0.06, 0.0),
-        (0.0, 0.0, 0.08, 0.0),
-        (0.0, 0.0, 0.0, 0.06),
-        (0.02, 0.02, 0.06, 0.0),
-    ]
-
+def _candidate_from_trim_spec(board_rgb, trim_spec):
+    left_ratio, right_ratio, top_ratio, bottom_ratio = trim_spec
     height, width = board_rgb.shape[:2]
+
+    left_margin = int(round(width * left_ratio))
+    right_margin = int(round(width * right_ratio))
+    top_margin = int(round(height * top_ratio))
+    bottom_margin = int(round(height * bottom_ratio))
+
+    if left_margin + right_margin >= width - 64:
+        return None
+    if top_margin + bottom_margin >= height - 64:
+        return None
+
+    cropped = board_rgb[
+        top_margin:height - bottom_margin,
+        left_margin:width - right_margin,
+    ]
+    if cropped.shape[0] < 128 or cropped.shape[1] < 128:
+        return None
+
+    candidate = _square_center_crop(cropped)
+    if candidate.shape[0] < 128 or candidate.shape[1] < 128:
+        return None
+    return candidate
+
+
+def _generate_prediction_crops(board_rgb, trim_specs=None):
+    trim_specs = trim_specs or DEFAULT_TRIM_SPECS
     seen_signatures = set()
 
-    for left_ratio, right_ratio, top_ratio, bottom_ratio in trim_specs:
-        left_margin = int(round(width * left_ratio))
-        right_margin = int(round(width * right_ratio))
-        top_margin = int(round(height * top_ratio))
-        bottom_margin = int(round(height * bottom_ratio))
-
-        if left_margin + right_margin >= width - 64:
-            continue
-        if top_margin + bottom_margin >= height - 64:
+    for trim_spec in trim_specs:
+        candidate = _candidate_from_trim_spec(board_rgb, trim_spec)
+        if candidate is None:
             continue
 
-        cropped = board_rgb[
-            top_margin:height - bottom_margin,
-            left_margin:width - right_margin,
-        ]
-        if cropped.shape[0] < 128 or cropped.shape[1] < 128:
-            continue
-
-        candidate = _square_center_crop(cropped)
         signature = _board_signature(candidate)
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
-        yield candidate, left_ratio + right_ratio + top_ratio + bottom_ratio
+        yield candidate, trim_spec, sum(trim_spec)
 
 
 def _build_candidate_board_specs(board_image, use_filters=True):
@@ -389,40 +534,42 @@ def _build_candidate_board_specs(board_image, use_filters=True):
     return sorted(deduped_candidates.values(), key=lambda item: item[0])
 
 
-def _evaluate_fen_candidate(
-    candidate,
-    predictor,
-    rotation_index,
-    estimated_occupancy,
-    transform_penalty,
-    trim_amount,
-):
-    if candidate.shape[0] < 128 or candidate.shape[1] < 128:
-        return None
+def _build_phase_candidate_descriptors(board_specs, phase_spec):
+    descriptors = []
+    trim_specs = phase_spec["trim_specs"]
 
-    try:
-        result = predict_chessboard_batch(
-            candidate,
-            predictor=predictor,
-            fen_type="compressed",
-        )
-    except Exception:
-        try:
-            from PIL import Image
+    for board_index, (transform_penalty, base_board) in enumerate(board_specs):
+        for rotation_index in range(4):
+            rotated = np.rot90(base_board, rotation_index)
+            for _, trim_spec, trim_amount in _generate_prediction_crops(
+                rotated,
+                trim_specs=trim_specs,
+            ):
+                descriptors.append(
+                    {
+                        "cache_key": (
+                            bool(phase_spec["use_filters"]),
+                            board_index,
+                            rotation_index,
+                            tuple(trim_spec),
+                        ),
+                        "base_board": base_board,
+                        "rotation_index": rotation_index,
+                        "transform_penalty": transform_penalty,
+                        "trim_spec": tuple(trim_spec),
+                        "trim_amount": trim_amount,
+                    }
+                )
 
-            result = predictor.predict_chessboard(
-                Image.fromarray(candidate),
-                fen_type="compressed",
-            )
-        except Exception:
-            return None
+    return descriptors
 
-    fen = (result.get("fen") or "").strip()
-    predictions = result.get("predictions") or []
-    cell_candidates = result.get("cell_candidates") or []
-    if not fen or not predictions or not cell_candidates:
-        return None
 
+def _materialize_descriptor_candidate(descriptor):
+    rotated = np.rot90(descriptor["base_board"], descriptor["rotation_index"])
+    return _candidate_from_trim_spec(rotated, descriptor["trim_spec"])
+
+
+def _normalize_prediction_result(fen, cell_candidates, rotation_index):
     fen = _rotate_fen_k_ccw(fen, (4 - rotation_index) % 4)
     cell_candidates = _rotate_cell_candidates_k_ccw(
         cell_candidates,
@@ -433,35 +580,68 @@ def _evaluate_fen_candidate(
         fen = _rotate_fen_k_ccw(fen, 2)
         cell_candidates = _rotate_cell_candidates_k_ccw(cell_candidates, 2)
 
+    return fen, cell_candidates, is_black_view
+
+
+def _build_occupancy_mask(candidate, rotation_index, is_black_view):
     occ_board = _square_center_crop(candidate)
     occ_mask = _occupied_mask(occ_board)
     occ_mask = _rotate_mask_k_ccw(occ_mask, (4 - rotation_index) % 4)
     if is_black_view:
         occ_mask = _rotate_mask_k_ccw(occ_mask, 2)
+    return occ_mask
 
+
+def _evaluate_prediction_result(
+    candidate,
+    result,
+    descriptor,
+    estimated_occupancy,
+):
+    fen = (result.get("fen") or "").strip()
+    predictions = result.get("predictions") or []
+    cell_candidates = result.get("cell_candidates") or []
+    if candidate is None or not fen or not predictions or not cell_candidates:
+        return None
+
+    fen, cell_candidates, is_black_view = _normalize_prediction_result(
+        fen=fen,
+        cell_candidates=cell_candidates,
+        rotation_index=descriptor["rotation_index"],
+    )
+    normalized_fen, quality_score = _quick_gate_candidate_fen(fen, cell_candidates)
+    if not normalized_fen:
+        return None
+
+    occ_mask = _build_occupancy_mask(
+        candidate=candidate,
+        rotation_index=descriptor["rotation_index"],
+        is_black_view=is_black_view,
+    )
     avg_confidence = float(np.mean([item[2] for item in predictions]))
     evaluations = []
 
     base_evaluation = _score_candidate_fen_variant(
-        fen=fen,
+        fen=normalized_fen,
         avg_confidence=avg_confidence,
         estimated_occupancy=estimated_occupancy,
         occ_mask=occ_mask,
-        transform_penalty=transform_penalty,
-        trim_amount=trim_amount,
+        transform_penalty=descriptor["transform_penalty"],
+        trim_amount=descriptor["trim_amount"],
         cell_candidates=cell_candidates,
+        quality_score=quality_score,
     )
     if base_evaluation is not None:
         evaluations.append(base_evaluation)
 
     evaluations.extend(
         _generate_local_repair_evaluations(
-            fen=fen,
+            fen=normalized_fen,
             cell_candidates=cell_candidates,
             occ_mask=occ_mask,
             estimated_occupancy=estimated_occupancy,
-            transform_penalty=transform_penalty,
-            trim_amount=trim_amount,
+            transform_penalty=descriptor["transform_penalty"],
+            trim_amount=descriptor["trim_amount"],
         )
     )
     if not evaluations:
@@ -547,7 +727,7 @@ def _choose_final_fen(fen_stats, votes, estimated_occupancy):
 
     if (
         ensemble_fen
-        and _score_fen_plausibility(ensemble_fen) >= 7
+        and _score_fen_plausibility(ensemble_fen) >= MIN_LOCAL_REPAIR_PLAUSIBILITY
         and _is_valid_piece_placement(ensemble_fen, side_to_move="w")
         and ensemble_occupancy_gap <= 8
         and ensemble_is_competitive
@@ -557,127 +737,274 @@ def _choose_final_fen(fen_stats, votes, estimated_occupancy):
     return best_single_fen, _meta_from_stats(best_single_stats, fallback_used=False)
 
 
-def _predict_best_fen(board_image, predictor, use_filters=True, progress_callback=None):
-    fen_stats: Dict[str, Dict[str, float]] = {}
-    estimated_occupancy = _estimate_occupied_squares(board_image)
-    votes = _init_votes()
-    best_valid_any = None
+def _apply_evaluation(evaluation, estimated_occupancy, fen_stats, votes, best_valid_any):
+    if evaluation is None:
+        return best_valid_any
 
-    candidate_board_specs = _build_candidate_board_specs(
-        board_image,
-        use_filters=use_filters,
+    if best_valid_any is None or evaluation["fallback_rank"] > best_valid_any["fallback_rank"]:
+        best_valid_any = evaluation
+
+    if estimated_occupancy >= 12 and evaluation["occupancy_gap"] > 10:
+        return best_valid_any
+
+    _apply_fen_votes(
+        votes,
+        evaluation["fen"],
+        weight=evaluation["aggregate_score"],
     )
-    estimated_total_steps = max(
-        1,
-        len(candidate_board_specs) * 4 * MAX_PREDICTION_CROPS_PER_ROTATION,
-    )
-    processed_steps = 0
-    if progress_callback:
-        progress_callback(
-            {
-                "stage": "fen",
-                "current": 0,
-                "total": estimated_total_steps,
-                "message": "Analyse du FEN...",
-                "estimated": True,
-            }
-        )
+    _update_fen_stats(fen_stats, evaluation)
+    return best_valid_any
 
-    for transform_penalty, base_board in candidate_board_specs:
-        for rotation_index in range(4):
-            rotated = np.rot90(base_board, rotation_index)
-            for candidate, trim_amount in _generate_prediction_crops(rotated):
-                processed_steps += 1
-                evaluation = _evaluate_fen_candidate(
-                    candidate=candidate,
-                    predictor=predictor,
-                    rotation_index=rotation_index,
-                    estimated_occupancy=estimated_occupancy,
-                    transform_penalty=transform_penalty,
-                    trim_amount=trim_amount,
-                )
-                if evaluation is None:
-                    if progress_callback and (
-                        processed_steps == 1
-                        or processed_steps % 4 == 0
-                        or processed_steps >= estimated_total_steps
-                    ):
-                        progress_callback(
-                            {
-                                "stage": "fen",
-                                "current": processed_steps,
-                                "total": estimated_total_steps,
-                                "message": "Analyse du FEN...",
-                                "estimated": True,
-                            }
-                        )
-                    continue
 
-                if (
-                    best_valid_any is None
-                    or evaluation["fallback_rank"] > best_valid_any["fallback_rank"]
-                ):
-                    best_valid_any = evaluation
-
-                if estimated_occupancy >= 12 and evaluation["occupancy_gap"] > 10:
-                    continue
-
-                _apply_fen_votes(
-                    votes,
-                    evaluation["fen"],
-                    weight=evaluation["aggregate_score"],
-                )
-                _update_fen_stats(fen_stats, evaluation)
-
-                if progress_callback and (
-                    processed_steps == 1
-                    or processed_steps % 4 == 0
-                    or processed_steps >= estimated_total_steps
-                ):
-                    progress_callback(
-                        {
-                            "stage": "fen",
-                            "current": processed_steps,
-                            "total": estimated_total_steps,
-                            "message": "Analyse du FEN...",
-                            "estimated": True,
-                        }
-                    )
-
+def _finalize_phase_result(fen_stats, votes, estimated_occupancy, best_valid_any, phase_name):
     if not fen_stats:
-        if progress_callback:
-            progress_callback(
-                {
-                    "stage": "fen",
-                    "current": estimated_total_steps,
-                    "total": estimated_total_steps,
-                    "message": "Analyse du FEN terminee.",
-                    "estimated": True,
-                }
-            )
         if best_valid_any is not None:
-            return best_valid_any["fen"], _build_prediction_meta(
+            meta = _build_prediction_meta(
                 quality_score=best_valid_any["quality_score"],
                 avg_confidence=best_valid_any["avg_confidence"],
                 stability_count=1,
                 fallback_used=True,
             )
+            meta["phase_name"] = phase_name
+            return best_valid_any["fen"], meta
 
-        return "", _build_prediction_meta(
+        meta = _build_prediction_meta(
             quality_score=0,
             avg_confidence=0.0,
             stability_count=0,
             fallback_used=True,
         )
+        meta["phase_name"] = phase_name
+        return "", meta
 
-    if progress_callback:
-        progress_callback(
-            {
-                "stage": "fen",
-                "current": estimated_total_steps,
-                "total": estimated_total_steps,
-                "message": "Analyse du FEN terminee.",
-                "estimated": True,
-            }
+    fen, meta = _choose_final_fen(fen_stats, votes, estimated_occupancy)
+    meta["phase_name"] = phase_name
+    return fen, meta
+
+
+def _run_prediction_phase(
+    board_image,
+    predictor,
+    estimated_occupancy,
+    phase_spec,
+    board_specs_cache,
+    evaluation_cache,
+    progress_callback=None,
+):
+    board_specs = board_specs_cache.get(phase_spec["use_filters"])
+    if board_specs is None:
+        board_specs = _build_candidate_board_specs(
+            board_image,
+            use_filters=phase_spec["use_filters"],
         )
-    return _choose_final_fen(fen_stats, votes, estimated_occupancy)
+        board_specs_cache[phase_spec["use_filters"]] = board_specs
+
+    max_board_specs = phase_spec["max_board_specs"]
+    if max_board_specs is not None:
+        board_specs = board_specs[:max_board_specs]
+
+    descriptors = _build_phase_candidate_descriptors(board_specs, phase_spec)
+    total_descriptors = len(descriptors)
+    fen_stats: Dict[str, Dict[str, float]] = {}
+    votes = _init_votes()
+    best_valid_any = None
+    processed = 0
+    pending_descriptors = []
+
+    _emit_progress(
+        progress_callback,
+        phase_spec,
+        current=0,
+        total=total_descriptors,
+        message=phase_spec["label"],
+    )
+
+    def _maybe_return_reliable_result():
+        if not fen_stats:
+            return None
+
+        fen, meta = _finalize_phase_result(
+            fen_stats=fen_stats,
+            votes=votes,
+            estimated_occupancy=estimated_occupancy,
+            best_valid_any=best_valid_any,
+            phase_name=phase_spec["name"],
+        )
+        if _meta_is_reliable(fen, meta):
+            _emit_progress(
+                progress_callback,
+                phase_spec,
+                current=processed,
+                total=total_descriptors,
+                message=phase_spec["complete_label"],
+            )
+            return fen, meta
+        return None
+
+    def _flush_pending():
+        nonlocal best_valid_any, processed, pending_descriptors
+
+        if not pending_descriptors:
+            return None
+
+        candidates = [_materialize_descriptor_candidate(descriptor) for descriptor in pending_descriptors]
+        results = predict_chessboard_batch_many(
+            candidates,
+            predictor=predictor,
+            fen_type="compressed",
+        )
+        for descriptor, candidate, result in zip(pending_descriptors, candidates, results):
+            evaluation = _evaluate_prediction_result(
+                candidate=candidate,
+                result=result,
+                descriptor=descriptor,
+                estimated_occupancy=estimated_occupancy,
+            )
+            evaluation_cache[descriptor["cache_key"]] = evaluation
+            best_valid_any = _apply_evaluation(
+                evaluation=evaluation,
+                estimated_occupancy=estimated_occupancy,
+                fen_stats=fen_stats,
+                votes=votes,
+                best_valid_any=best_valid_any,
+            )
+            processed += 1
+            reliable_result = _maybe_return_reliable_result()
+            if reliable_result is not None:
+                pending_descriptors = []
+                return reliable_result
+            if processed == total_descriptors or processed % 4 == 0:
+                _emit_progress(
+                    progress_callback,
+                    phase_spec,
+                    current=processed,
+                    total=total_descriptors,
+                    message=phase_spec["label"],
+                )
+
+        pending_descriptors = []
+        return None
+
+    materialization_chunk_size = _board_batch_materialization_size(predictor)
+    for descriptor in descriptors:
+        cached_evaluation = evaluation_cache.get(descriptor["cache_key"], _MISSING)
+        if cached_evaluation is not _MISSING:
+            best_valid_any = _apply_evaluation(
+                evaluation=cached_evaluation,
+                estimated_occupancy=estimated_occupancy,
+                fen_stats=fen_stats,
+                votes=votes,
+                best_valid_any=best_valid_any,
+            )
+            processed += 1
+            reliable_result = _maybe_return_reliable_result()
+            if reliable_result is not None:
+                return reliable_result
+            if processed == total_descriptors or processed % 4 == 0:
+                _emit_progress(
+                    progress_callback,
+                    phase_spec,
+                    current=processed,
+                    total=total_descriptors,
+                    message=phase_spec["label"],
+                )
+            continue
+
+        pending_descriptors.append(descriptor)
+        if len(pending_descriptors) >= materialization_chunk_size:
+            reliable_result = _flush_pending()
+            if reliable_result is not None:
+                return reliable_result
+
+    reliable_result = _flush_pending()
+    if reliable_result is not None:
+        return reliable_result
+    _emit_progress(
+        progress_callback,
+        phase_spec,
+        current=total_descriptors,
+        total=total_descriptors,
+        message=phase_spec["complete_label"],
+    )
+    return _finalize_phase_result(
+        fen_stats=fen_stats,
+        votes=votes,
+        estimated_occupancy=estimated_occupancy,
+        best_valid_any=best_valid_any,
+        phase_name=phase_spec["name"],
+    )
+
+
+def _predict_best_fen(
+    board_image,
+    predictor,
+    use_filters=True,
+    progress_callback=None,
+    strategy="auto_precise",
+):
+    estimated_occupancy = _estimate_occupied_squares(board_image)
+    board_specs_cache = {}
+    evaluation_cache = {}
+
+    if strategy == "exhaustive":
+        phase_specs = EXHAUSTIVE_ONLY_PHASE
+        if not use_filters:
+            phase_specs = (
+                dict(EXHAUSTIVE_ONLY_PHASE[0], use_filters=False),
+            )
+    else:
+        phase_specs = PHASE_SPECS
+        if not use_filters:
+            phase_specs = tuple(
+                dict(phase_spec, use_filters=False)
+                for phase_spec in phase_specs
+            )
+
+    last_fen = ""
+    last_meta = _build_prediction_meta(
+        quality_score=0,
+        avg_confidence=0.0,
+        stability_count=0,
+        fallback_used=True,
+    )
+    previous_phase_fen = ""
+
+    for phase_spec in phase_specs:
+        fen, meta = _run_prediction_phase(
+            board_image=board_image,
+            predictor=predictor,
+            estimated_occupancy=estimated_occupancy,
+            phase_spec=phase_spec,
+            board_specs_cache=board_specs_cache,
+            evaluation_cache=evaluation_cache,
+            progress_callback=progress_callback,
+        )
+        last_fen = fen
+        last_meta = meta
+
+        if _meta_is_reliable(fen, meta):
+            return fen, meta
+
+        if phase_spec["name"] == "quick":
+            previous_phase_fen = fen
+            continue
+
+        if (
+            phase_spec["name"] == "deep"
+            and fen
+            and fen == previous_phase_fen
+            and int(meta.get("stability_count") or 0) >= DEEP_PHASE_STABILITY_SHORT_CIRCUIT
+        ):
+            return fen, meta
+
+        if (
+            phase_spec["name"] == "deep"
+            and fen
+            and fen == previous_phase_fen
+            and int(meta.get("quality_score") or 0) >= MIN_RELIABLE_QUALITY
+            and float(meta.get("avg_confidence") or 0.0)
+            < MIN_RELIABLE_CONFIDENCE_WITH_STRONG_STABILITY
+        ):
+            return fen, meta
+
+    return last_fen, last_meta

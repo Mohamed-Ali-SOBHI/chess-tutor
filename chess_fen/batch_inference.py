@@ -1,43 +1,61 @@
 from functools import reduce
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
 
 from chessimg2pos.utils import compressed_fen
 
+CPU_BOARD_BATCH_SIZE = 8
+CUDA_BOARD_BATCH_SIZE = 16
 TOP_K_TILE_CANDIDATES = 5
+
+
+def _board_batch_size_for_predictor(predictor):
+    device_label = str(getattr(predictor, "device", "cpu")).lower()
+    if "cuda" in device_label:
+        return CUDA_BOARD_BATCH_SIZE
+    return CPU_BOARD_BATCH_SIZE
 
 
 def _resize_board_to_256(candidate_rgb):
     board_image = Image.fromarray(candidate_rgb, "RGB")
-    return board_image.resize((256, 256), Image.BILINEAR)
+    resized_board = board_image.resize((256, 256), Image.BILINEAR)
+    return np.asarray(resized_board, dtype=np.uint8)
 
 
-def _prepare_tile_batch(candidate_rgb, use_grayscale):
+def _prepare_single_tile_batch(candidate_rgb, use_grayscale):
     resized_board = _resize_board_to_256(candidate_rgb)
 
     if use_grayscale:
-        resized_board = resized_board.convert("L", (0.2989, 0.5870, 0.1140, 0))
-        board_array = np.asarray(resized_board, dtype=np.uint8)
+        board_array = cv2.cvtColor(resized_board, cv2.COLOR_RGB2GRAY)
         tiles = (
             board_array.reshape(8, 32, 8, 32)
             .transpose(0, 2, 1, 3)
-            .reshape(64, 32, 32)
+            .reshape(64, 1, 32, 32)
         )
-        tile_batch = torch.from_numpy(np.ascontiguousarray(tiles)).unsqueeze(1)
     else:
-        board_array = np.asarray(resized_board, dtype=np.uint8)
         tiles = (
-            board_array.reshape(8, 32, 8, 32, 3)
+            resized_board.reshape(8, 32, 8, 32, 3)
             .transpose(0, 2, 4, 1, 3)
             .reshape(64, 3, 32, 32)
         )
-        tile_batch = torch.from_numpy(np.ascontiguousarray(tiles))
 
-    tile_batch = tile_batch.float().div_(255.0)
-    tile_batch.sub_(0.5).div_(0.5)
+    tile_batch = np.ascontiguousarray(tiles, dtype=np.float32)
+    tile_batch /= 255.0
+    tile_batch -= 0.5
+    tile_batch /= 0.5
     return tile_batch
+
+
+def _prepare_board_tile_batch(candidate_rgbs, use_grayscale):
+    per_board_batches = [
+        _prepare_single_tile_batch(candidate_rgb, use_grayscale=use_grayscale)
+        for candidate_rgb in candidate_rgbs
+    ]
+    tile_batch = np.concatenate(per_board_batches, axis=0)
+    return torch.from_numpy(tile_batch)
 
 
 def _build_predictions_from_outputs(probabilities, fen_chars):
@@ -90,8 +108,21 @@ def _predictions_to_fen(predictions, fen_type):
     return fen_notation
 
 
-def predict_chessboard_batch(candidate_rgb, predictor, fen_type="standard"):
-    tile_batch = _prepare_tile_batch(candidate_rgb, predictor.use_grayscale)
+def _result_from_probabilities(probabilities, fen_chars, fen_type):
+    predictions = _build_predictions_from_outputs(probabilities, fen_chars)
+    cell_candidates = _build_cell_candidates_from_outputs(probabilities, fen_chars)
+    fen = _predictions_to_fen(predictions, fen_type=fen_type)
+    confidence = reduce(lambda x, y: x * y, (item[2] for item in predictions), 1.0)
+    return {
+        "fen": fen,
+        "confidence": confidence,
+        "predictions": predictions,
+        "cell_candidates": cell_candidates,
+    }
+
+
+def _run_model_for_boards(candidate_rgbs, predictor):
+    tile_batch = _prepare_board_tile_batch(candidate_rgbs, predictor.use_grayscale)
     if getattr(predictor, "_use_channels_last", False) and tile_batch.ndim == 4:
         tile_batch = tile_batch.contiguous(memory_format=torch.channels_last)
     tile_batch = tile_batch.to(
@@ -103,17 +134,41 @@ def predict_chessboard_batch(candidate_rgb, predictor, fen_type="standard"):
         outputs = predictor.model(tile_batch)
         probabilities = torch.nn.functional.softmax(outputs, dim=1)
 
-    predictions = _build_predictions_from_outputs(probabilities, predictor.fen_chars)
-    cell_candidates = _build_cell_candidates_from_outputs(
-        probabilities,
-        predictor.fen_chars,
-    )
-    fen = _predictions_to_fen(predictions, fen_type=fen_type)
-    confidence = reduce(lambda x, y: x * y, (item[2] for item in predictions), 1.0)
+    board_count = len(candidate_rgbs)
+    return probabilities.reshape(board_count, 64, probabilities.shape[-1])
 
-    return {
-        "fen": fen,
-        "confidence": confidence,
-        "predictions": predictions,
-        "cell_candidates": cell_candidates,
-    }
+
+def predict_chessboard_batch_many(
+    candidate_rgbs,
+    predictor,
+    fen_type="standard",
+    board_batch_size=None,
+):
+    if not candidate_rgbs:
+        return []
+
+    board_batch_size = board_batch_size or _board_batch_size_for_predictor(predictor)
+    results = []
+    for start_index in range(0, len(candidate_rgbs), board_batch_size):
+        candidate_chunk = candidate_rgbs[start_index:start_index + board_batch_size]
+        probabilities_chunk = _run_model_for_boards(candidate_chunk, predictor)
+        for board_index in range(probabilities_chunk.shape[0]):
+            results.append(
+                _result_from_probabilities(
+                    probabilities=probabilities_chunk[board_index],
+                    fen_chars=predictor.fen_chars,
+                    fen_type=fen_type,
+                )
+            )
+
+    return results
+
+
+def predict_chessboard_batch(candidate_rgb, predictor, fen_type="standard"):
+    results = predict_chessboard_batch_many(
+        [candidate_rgb],
+        predictor=predictor,
+        fen_type=fen_type,
+        board_batch_size=1,
+    )
+    return results[0]

@@ -1,3 +1,6 @@
+import atexit
+import threading
+
 try:
     import chess
     import chess.engine
@@ -10,6 +13,16 @@ from .stockfish_manager import (
     iter_existing_stockfish_paths,
     iter_installable_stockfish_paths,
 )
+
+_ENGINE_CACHE = {}
+_ENGINE_CACHE_LOCK = threading.Lock()
+
+
+class _CachedEngineSession:
+    def __init__(self, engine, applied_engine_elo):
+        self.engine = engine
+        self.applied_engine_elo = applied_engine_elo
+        self.lock = threading.Lock()
 
 
 def _resolve_stockfish_path(stockfish_path=None):
@@ -65,13 +78,77 @@ def _configure_engine_strength(engine, engine_elo):
     return None
 
 
-def _play_with_engine(board, stockfish_path, think_time, engine_elo):
-    with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
-        applied_engine_elo = _configure_engine_strength(engine, engine_elo)
-        play_result = engine.play(board, chess.engine.Limit(time=think_time))
-        analysis = engine.analyse(board, chess.engine.Limit(time=think_time))
+def _engine_cache_key(stockfish_path, engine_elo):
+    return stockfish_path, int(engine_elo) if engine_elo is not None else None
 
-    return play_result, analysis, applied_engine_elo
+
+def _discard_cached_engine(stockfish_path, engine_elo):
+    entry = None
+    with _ENGINE_CACHE_LOCK:
+        entry = _ENGINE_CACHE.pop(_engine_cache_key(stockfish_path, engine_elo), None)
+
+    if entry is None:
+        return
+
+    try:
+        entry.engine.quit()
+    except Exception:
+        pass
+
+
+def close_cached_engines():
+    with _ENGINE_CACHE_LOCK:
+        entries = list(_ENGINE_CACHE.values())
+        _ENGINE_CACHE.clear()
+
+    for entry in entries:
+        try:
+            entry.engine.quit()
+        except Exception:
+            pass
+
+
+def _get_cached_engine_session(stockfish_path, engine_elo):
+    cache_key = _engine_cache_key(stockfish_path, engine_elo)
+    with _ENGINE_CACHE_LOCK:
+        cached_entry = _ENGINE_CACHE.get(cache_key)
+        if cached_entry is not None:
+            return cached_entry
+
+    engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+    applied_engine_elo = _configure_engine_strength(engine, engine_elo)
+    entry = _CachedEngineSession(engine=engine, applied_engine_elo=applied_engine_elo)
+    with _ENGINE_CACHE_LOCK:
+        previous_entry = _ENGINE_CACHE.get(cache_key)
+        if previous_entry is not None:
+            try:
+                engine.quit()
+            except Exception:
+                pass
+            return previous_entry
+
+        _ENGINE_CACHE[cache_key] = entry
+    return entry
+
+
+def _play_with_engine(board, stockfish_path, think_time, engine_elo):
+    last_error = None
+    for _ in range(2):
+        entry = _get_cached_engine_session(stockfish_path, engine_elo)
+        with entry.lock:
+            try:
+                play_result = entry.engine.play(board, chess.engine.Limit(time=think_time))
+                analysis = entry.engine.analyse(board, chess.engine.Limit(time=think_time))
+                return play_result, analysis, entry.applied_engine_elo
+            except (
+                OSError,
+                chess.engine.EngineError,
+                chess.engine.EngineTerminatedError,
+            ) as error:
+                last_error = error
+        _discard_cached_engine(stockfish_path, engine_elo)
+
+    raise last_error
 
 
 def get_best_move_from_fen(
@@ -142,3 +219,6 @@ def get_best_move_from_fen(
         "engine_elo": applied_engine_elo,
         "stockfish_path": resolved_stockfish_path,
     }
+
+
+atexit.register(close_cached_engines)

@@ -56,6 +56,7 @@ def _build_prediction_result(source_label, board_image, fen, meta):
         "avg_confidence": meta["avg_confidence"],
         "stability_count": int(meta.get("stability_count", 0)),
         "fallback_used": bool(meta.get("fallback_used", 0)),
+        "phase_name": meta.get("phase_name", ""),
         "board_image": board_image,
     }
 
@@ -120,6 +121,7 @@ def _predict_board_image(
         predictor,
         use_filters=use_filters,
         progress_callback=progress_callback,
+        strategy="auto_precise",
     )
     result = _build_prediction_result(
         source_label=source_label,
@@ -429,7 +431,12 @@ def _convert_single_image_to_fen(image_path, predictor, use_filters):
     if board_image is None:
         return "", None, board_image_message
 
-    fen, meta = _predict_best_fen(board_image, predictor, use_filters=use_filters)
+    fen, meta = _predict_best_fen(
+        board_image,
+        predictor,
+        use_filters=use_filters,
+        strategy="exhaustive",
+    )
     return fen, meta, board_image_message
 
 
