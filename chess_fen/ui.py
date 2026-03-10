@@ -28,12 +28,14 @@ class ChessAssistantApp:
         self.colors = {
             "window": "#f3f4f6",
             "surface": "#ffffff",
+            "surface_alt": "#f8faf9",
             "border": "#e5e7eb",
             "text": "#111111",
             "muted": "#6b7280",
             "accent": "#34c759",
             "accent_pressed": "#248a3d",
             "accent_soft": "#eaf9ee",
+            "accent_soft_strong": "#dff5e6",
             "success": "#248a3d",
             "success_soft": "#eaf9ee",
             "warning": "#a16207",
@@ -165,7 +167,7 @@ class ChessAssistantApp:
 
     def _build_controls(self, parent):
         card = self._create_card(parent, row=0, pady=(0, 10))
-        body = tk.Frame(card, bg=self.colors["surface"], padx=12, pady=12)
+        body = tk.Frame(card, bg=self.colors["surface"], padx=14, pady=14)
         body.grid(row=0, column=0, sticky="nsew")
         body.grid_columnconfigure(0, weight=1)
 
@@ -208,7 +210,7 @@ class ChessAssistantApp:
         )
         self.status_badge_label.grid(row=0, column=2, sticky="e")
 
-        self._build_segmented_control(body).grid(row=1, column=0, sticky="ew", pady=(8, 8))
+        self._build_segmented_control(body).grid(row=1, column=0, sticky="ew", pady=(10, 10))
 
         self.analyze_button = tk.Button(
             body,
@@ -226,7 +228,7 @@ class ChessAssistantApp:
         self.analyze_button.grid(row=2, column=0, sticky="ew")
 
         stage_row = tk.Frame(body, bg=self.colors["surface"])
-        stage_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        stage_row.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         stage_row.grid_columnconfigure(0, weight=1)
 
         tk.Label(
@@ -299,48 +301,53 @@ class ChessAssistantApp:
 
     def _build_results(self, parent):
         card = self._create_card(parent, row=1)
-        body = tk.Frame(card, bg=self.colors["surface"], padx=12, pady=12)
+        body = tk.Frame(card, bg=self.colors["surface"], padx=14, pady=14)
         body.grid(row=0, column=0, sticky="nsew")
         body.grid_columnconfigure(0, weight=1)
 
-        tk.Label(
+        move_panel = tk.Frame(
             body,
-            text="Coup",
+            bg=self.colors["accent_soft"],
+            highlightbackground=self.colors["accent_soft_strong"],
+            highlightthickness=1,
+            bd=0,
+            padx=12,
+            pady=12,
+        )
+        move_panel.grid(row=0, column=0, sticky="ew")
+        move_panel.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            move_panel,
+            text="Recommandation",
             font=self.label_font,
-            fg=self.colors["muted"],
-            bg=self.colors["surface"],
+            fg=self.colors["accent"],
+            bg=self.colors["accent_soft"],
         ).grid(row=0, column=0, sticky="w")
 
         move_label = tk.Label(
-            body,
+            move_panel,
             textvariable=self.best_move_var,
             font=self.move_font,
             fg=self.colors["text"],
-            bg=self.colors["surface"],
+            bg=self.colors["accent_soft"],
             justify="left",
             anchor="w",
         )
-        move_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        self._register_dynamic_wrap(move_label, padding=72, min_wrap=180)
+        move_label.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._register_dynamic_wrap(move_label, padding=42, min_wrap=210)
 
         eval_label = tk.Label(
-            body,
+            move_panel,
             textvariable=self.eval_var,
             font=self.body_font,
             fg=self.colors["muted"],
-            bg=self.colors["surface"],
+            bg=self.colors["accent_soft"],
             justify="left",
             anchor="w",
         )
-        eval_label.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        self._register_dynamic_wrap(eval_label, padding=72, min_wrap=170)
-
-        tk.Frame(body, bg=self.colors["line"], height=1).grid(
-            row=3,
-            column=0,
-            sticky="ew",
-            pady=(8, 8),
-        )
+        eval_label.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        self._register_dynamic_wrap(eval_label, padding=42, min_wrap=190)
 
         tk.Label(
             body,
@@ -348,26 +355,31 @@ class ChessAssistantApp:
             font=self.label_font,
             fg=self.colors["muted"],
             bg=self.colors["surface"],
-        ).grid(row=4, column=0, sticky="w")
+        ).grid(row=1, column=0, sticky="w", pady=(12, 0))
+
+        fen_frame = tk.Frame(
+            body,
+            bg=self.colors["surface_alt"],
+            highlightbackground=self.colors["border"],
+            highlightthickness=1,
+            bd=0,
+            padx=10,
+            pady=10,
+        )
+        fen_frame.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        fen_frame.grid_columnconfigure(0, weight=1)
 
         fen_label = tk.Label(
-            body,
+            fen_frame,
             textvariable=self.fen_var,
             font=self.mono_font,
             fg=self.colors["text"],
-            bg=self.colors["surface"],
+            bg=self.colors["surface_alt"],
             justify="left",
             anchor="w",
         )
-        fen_label.grid(row=5, column=0, sticky="ew", pady=(4, 0))
-        self._register_dynamic_wrap(fen_label, padding=72, min_wrap=180)
-
-        tk.Frame(body, bg=self.colors["line"], height=1).grid(
-            row=6,
-            column=0,
-            sticky="ew",
-            pady=(8, 8),
-        )
+        fen_label.grid(row=0, column=0, sticky="ew")
+        self._register_dynamic_wrap(fen_label, padding=42, min_wrap=210)
 
         tk.Label(
             body,
@@ -375,7 +387,7 @@ class ChessAssistantApp:
             font=self.label_font,
             fg=self.colors["muted"],
             bg=self.colors["surface"],
-        ).grid(row=7, column=0, sticky="w")
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
 
         details_label = tk.Label(
             body,
@@ -386,7 +398,7 @@ class ChessAssistantApp:
             justify="left",
             anchor="w",
         )
-        details_label.grid(row=8, column=0, sticky="ew", pady=(4, 0))
+        details_label.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         self._register_dynamic_wrap(details_label, padding=72, min_wrap=180)
 
         system_label = tk.Label(
@@ -398,7 +410,7 @@ class ChessAssistantApp:
             justify="left",
             anchor="w",
         )
-        system_label.grid(row=9, column=0, sticky="ew", pady=(4, 0))
+        system_label.grid(row=5, column=0, sticky="ew", pady=(4, 0))
         self._register_dynamic_wrap(system_label, padding=72, min_wrap=170)
 
     def _create_card(self, parent, row, pady=(0, 0)):
@@ -410,6 +422,8 @@ class ChessAssistantApp:
             bd=0,
         )
         card.grid(row=row, column=0, sticky="ew", pady=pady)
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=1)
         return card
 
     def _bind_mousewheel(self, _event=None):
@@ -539,10 +553,10 @@ class ChessAssistantApp:
         for side, button in self.side_buttons.items():
             is_selected = side == selected_side
             button.configure(
-                bg=self.colors["surface"] if is_selected else self.colors["segment"],
-                fg=self.colors["text"] if is_selected else self.colors["muted"],
-                activebackground=self.colors["surface"] if is_selected else self.colors["segment"],
-                activeforeground=self.colors["text"],
+                bg=self.colors["accent_soft"] if is_selected else self.colors["segment"],
+                fg=self.colors["accent"] if is_selected else self.colors["muted"],
+                activebackground=self.colors["accent_soft"] if is_selected else self.colors["segment"],
+                activeforeground=self.colors["accent"] if is_selected else self.colors["text"],
                 state="disabled" if self.is_busy else "normal",
                 cursor="arrow" if self.is_busy else "hand2",
             )
