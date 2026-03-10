@@ -1,6 +1,6 @@
-# Chess Screen Assistant
+# Chess Tutor
 
-Application Windows pour capturer ton ecran, detecter automatiquement un plateau d'echecs visible dans la capture, extraire le FEN et demander un meilleur coup a Stockfish en mode fort par defaut.
+Application Windows compacte pour capturer ton ecran, detecter automatiquement un plateau d'echecs visible dans la capture, extraire le FEN et demander un meilleur coup a Stockfish en mode fort par defaut.
 
 ## Apercu
 
@@ -19,9 +19,10 @@ Application Windows pour capturer ton ecran, detecter automatiquement un plateau
 ## Ce que fait le projet
 
 - capture tout l'ecran
+- reste dans une petite fenetre laterale epinglable
 - detecte le plateau dans une image plein ecran
 - extrait le FEN avec un pipeline de vision + classification
-- demande un coup a Stockfish
+- demande un coup a Stockfish non bride
 - installe Stockfish automatiquement si le moteur n'est pas deja present
 - garde un mode script pour traiter un dossier d'images
 
@@ -58,9 +59,9 @@ ou :
 
 1. Affiche le plateau sur ton ecran.
 2. Lance l'application.
-3. Laisse le champ `Stockfish` vide pour l'installation automatique, ou renseigne un moteur existant si tu veux forcer un binaire precis.
-4. Choisis le camp au trait : `Blancs` ou `Noirs`.
-5. Clique sur `Capturer l'ecran et recommander`.
+3. Choisis le camp au trait : `Blancs` ou `Noirs`.
+4. Laisse la fenetre en mode `Epinglee` si tu veux qu'elle reste au-dessus du jeu.
+5. Clique sur `Capturer et recommander`.
 
 Le flux complet est :
 
@@ -74,10 +75,13 @@ Si aucun moteur n'est trouve, l'application telecharge automatiquement une versi
 
 ## Configurer Stockfish
 
-Trois options :
+Par defaut, tu n'as rien a faire :
 
-- ne rien faire : l'application installe automatiquement Stockfish au premier calcul
-- renseigner le chemin dans le champ de l'application
+- l'application cherche un moteur existant
+- sinon elle telecharge automatiquement Stockfish au premier calcul
+
+Configuration avancee possible :
+
 - definir la variable d'environnement `STOCKFISH_PATH`
 
 Exemple PowerShell :
@@ -86,7 +90,7 @@ Exemple PowerShell :
 $env:STOCKFISH_PATH="C:\chemin\vers\stockfish.exe"
 ```
 
-Le moteur est configure sans limitation Elo par defaut, avec un temps de reflexion plus long pour des coups plus solides.
+Le moteur est configure sans limitation Elo par defaut, avec `1.0` seconde de reflexion par coup.
 
 ## Mode script
 
@@ -124,14 +128,14 @@ Ce mode parcourt les images du dossier courant et ecrit les resultats dans `fen_
 Cause probable :
 
 - le telechargement automatique du moteur a echoue
-- le chemin fourni pointe vers un mauvais fichier
 - le moteur telecharge n'est pas compatible avec la machine
+- le FEN a ete juge non fiable, donc le moteur a ete bloque
 
 Solution :
 
-- laisse le champ vide pour forcer l'installation automatique
-- selectionne `stockfish.exe` via `Parcourir` si tu veux utiliser ton propre moteur
-- ou configure `STOCKFISH_PATH`
+- relance une analyse sur un plateau plus propre
+- laisse l'installation automatique faire son travail
+- ou configure `STOCKFISH_PATH` si tu veux imposer un binaire precis
 
 ### Le FEN est vide ou faux
 
@@ -163,6 +167,18 @@ Solution :
 - relance l'application en local
 - verifie qu'une capture d'ecran classique fonctionne sur la machine
 
+### La fenetre disparait derriere le jeu
+
+Cause probable :
+
+- le mode `Epinglee` est desactive
+- le jeu tourne en plein ecran exclusif
+
+Solution :
+
+- active `Epinglee`
+- prefere le mode fenetre ou plein ecran fenetre pour le jeu
+
 ### Le premier lancement est lent
 
 Cause probable :
@@ -174,6 +190,7 @@ Solution :
 
 - attends le premier chargement
 - les lancements suivants seront plus rapides
+- le moteur reste ensuite reutilise localement
 
 ### Le script Python ne se lance pas
 
@@ -193,3 +210,4 @@ Si ca echoue :
 - Le pipeline accepte les captures plein ecran, pas seulement des screenshots deja recadres.
 - Le FEN reste deterministe sur les captures de test actuelles.
 - Le moteur est auto-installe au premier usage si besoin, puis reutilise localement.
+- L'interface actuelle est une petite fenetre verticale prevue pour rester sur le cote de l'ecran.
