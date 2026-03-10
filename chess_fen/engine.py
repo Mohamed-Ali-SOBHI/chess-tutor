@@ -1,6 +1,3 @@
-import os
-import shutil
-
 try:
     import chess
     import chess.engine
@@ -9,31 +6,45 @@ except ImportError:
 
 from .constants import DEFAULT_ENGINE_ELO
 from .fen_utils import _to_full_fen
+from .stockfish_manager import (
+    iter_existing_stockfish_paths,
+    iter_installable_stockfish_paths,
+)
 
 
 def _resolve_stockfish_path(stockfish_path=None):
-    candidate_paths = []
-    if stockfish_path:
-        candidate_paths.append(stockfish_path)
-
-    for env_var in ("STOCKFISH_PATH", "STOCKFISH_EXECUTABLE"):
-        env_value = os.environ.get(env_var)
-        if env_value:
-            candidate_paths.append(env_value)
-
-    which_stockfish = shutil.which("stockfish") or shutil.which("stockfish.exe")
-    if which_stockfish:
-        candidate_paths.append(which_stockfish)
-
-    for candidate_path in candidate_paths:
-        normalized_path = os.path.abspath(candidate_path)
-        if os.path.isfile(normalized_path):
-            return normalized_path
+    for candidate_path in iter_existing_stockfish_paths(stockfish_path=stockfish_path):
+        return candidate_path
 
     raise ValueError(
-        "Chemin Stockfish invalide. "
-        "Passez `stockfish_path`, ou definissez `STOCKFISH_PATH`."
+        "Stockfish introuvable. "
+        "Le moteur sera installe automatiquement au premier calcul si aucun chemin n'est fourni."
     )
+
+
+def _iter_stockfish_launch_candidates(
+    stockfish_path=None,
+    auto_install=True,
+    progress_callback=None,
+):
+    yielded_paths = set()
+
+    for candidate_path in iter_existing_stockfish_paths(stockfish_path=stockfish_path):
+        if candidate_path in yielded_paths:
+            continue
+        yielded_paths.add(candidate_path)
+        yield candidate_path
+
+    if stockfish_path or not auto_install:
+        return
+
+    for candidate_path in iter_installable_stockfish_paths(
+        progress_callback=progress_callback,
+    ):
+        if candidate_path in yielded_paths:
+            continue
+        yielded_paths.add(candidate_path)
+        yield candidate_path
 
 
 def _configure_engine_strength(engine, engine_elo):
@@ -54,26 +65,59 @@ def _configure_engine_strength(engine, engine_elo):
     return None
 
 
+def _play_with_engine(board, stockfish_path, think_time, engine_elo):
+    with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+        applied_engine_elo = _configure_engine_strength(engine, engine_elo)
+        play_result = engine.play(board, chess.engine.Limit(time=think_time))
+        analysis = engine.analyse(board, chess.engine.Limit(time=think_time))
+
+    return play_result, analysis, applied_engine_elo
+
+
 def get_best_move_from_fen(
     fen,
     stockfish_path=None,
     side_to_move="w",
     think_time=0.20,
     engine_elo=DEFAULT_ENGINE_ELO,
+    auto_install=True,
+    progress_callback=None,
 ):
     if chess is None:
         raise ImportError(
             "python-chess n'est pas installe. Executez: pip install python-chess"
         )
 
-    resolved_stockfish_path = _resolve_stockfish_path(stockfish_path)
     full_fen = _to_full_fen(fen, side_to_move=side_to_move)
     board = chess.Board(full_fen)
 
-    with chess.engine.SimpleEngine.popen_uci(resolved_stockfish_path) as engine:
-        applied_engine_elo = _configure_engine_strength(engine, engine_elo)
-        play_result = engine.play(board, chess.engine.Limit(time=think_time))
-        analysis = engine.analyse(board, chess.engine.Limit(time=think_time))
+    last_engine_error = None
+    resolved_stockfish_path = None
+
+    for candidate_path in _iter_stockfish_launch_candidates(
+        stockfish_path=stockfish_path,
+        auto_install=auto_install,
+        progress_callback=progress_callback,
+    ):
+        resolved_stockfish_path = candidate_path
+        try:
+            play_result, analysis, applied_engine_elo = _play_with_engine(
+                board=board,
+                stockfish_path=candidate_path,
+                think_time=think_time,
+                engine_elo=engine_elo,
+            )
+            break
+        except (OSError, chess.engine.EngineError, chess.engine.EngineTerminatedError) as error:
+            last_engine_error = error
+    else:
+        if stockfish_path:
+            raise ValueError(f"Chemin Stockfish invalide ou inutilisable: {stockfish_path}")
+        if last_engine_error is not None:
+            raise RuntimeError(
+                f"Impossible de lancer Stockfish automatiquement: {last_engine_error}"
+            ) from last_engine_error
+        raise RuntimeError("Aucun binaire Stockfish disponible")
 
     move = play_result.move
     if move is None:
@@ -90,6 +134,7 @@ def get_best_move_from_fen(
     return {
         "fen": fen,
         "full_fen": full_fen,
+        "side_to_move": side_to_move,
         "best_move_uci": move.uci(),
         "best_move_san": board.san(move),
         "score_cp": score_cp,

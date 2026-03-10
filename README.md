@@ -22,6 +22,7 @@ Application Windows pour capturer ton ecran, detecter automatiquement un plateau
 - detecte le plateau dans une image plein ecran
 - extrait le FEN avec un pipeline de vision + classification
 - demande un coup a Stockfish
+- installe Stockfish automatiquement si le moteur n'est pas deja present
 - garde un mode script pour traiter un dossier d'images
 
 ## Prerequis
@@ -29,7 +30,7 @@ Application Windows pour capturer ton ecran, detecter automatiquement un plateau
 - Windows
 - Python 3.10 ou plus recent
 - un environnement virtuel Python
-- Stockfish si tu veux une recommandation de coup
+- connexion reseau au premier calcul moteur si Stockfish n'est pas deja present
 
 ## Installation
 
@@ -57,7 +58,7 @@ ou :
 
 1. Affiche le plateau sur ton ecran.
 2. Lance l'application.
-3. Renseigne `stockfish.exe` si tu veux une recommandation de coup.
+3. Laisse le champ `Stockfish` vide pour l'installation automatique, ou renseigne un moteur existant si tu veux forcer un binaire precis.
 4. Choisis le camp au trait : `Blancs` ou `Noirs`.
 5. Clique sur `Capturer l'ecran et recommander`.
 
@@ -69,12 +70,13 @@ Le flux complet est :
 4. evaluation moteur
 5. affichage du meilleur coup
 
-Si Stockfish n'est pas configure, l'application affiche quand meme le FEN detecte.
+Si aucun moteur n'est trouve, l'application telecharge automatiquement une version Windows officielle de Stockfish au premier calcul.
 
 ## Configurer Stockfish
 
-Deux options :
+Trois options :
 
+- ne rien faire : l'application installe automatiquement Stockfish au premier calcul
 - renseigner le chemin dans le champ de l'application
 - definir la variable d'environnement `STOCKFISH_PATH`
 
@@ -100,6 +102,7 @@ Ce mode parcourt les images du dossier courant et ecrit les resultats dans `fen_
 
 - `fen_results.csv` : resultats du traitement par lot
 - `fen_overrides.csv` : corrections manuelles de FEN
+- `runtime/stockfish` : moteur telecharge automatiquement en local
 
 ## Structure du projet
 
@@ -120,12 +123,14 @@ Ce mode parcourt les images du dossier courant et ecrit les resultats dans `fen_
 
 Cause probable :
 
-- `stockfish.exe` n'est pas configure
-- le chemin pointe vers un mauvais fichier
+- le telechargement automatique du moteur a echoue
+- le chemin fourni pointe vers un mauvais fichier
+- le moteur telecharge n'est pas compatible avec la machine
 
 Solution :
 
-- selectionne `stockfish.exe` via `Parcourir`
+- laisse le champ vide pour forcer l'installation automatique
+- selectionne `stockfish.exe` via `Parcourir` si tu veux utiliser ton propre moteur
 - ou configure `STOCKFISH_PATH`
 
 ### Le FEN est vide ou faux
@@ -163,6 +168,7 @@ Solution :
 Cause probable :
 
 - telechargement du modele `chessimg2pos`
+- telechargement automatique de Stockfish
 
 Solution :
 
@@ -186,4 +192,4 @@ Si ca echoue :
 
 - Le pipeline accepte les captures plein ecran, pas seulement des screenshots deja recadres.
 - Le FEN reste deterministe sur les captures de test actuelles.
-- Sans moteur disponible, l'application reste utile pour recuperer le FEN uniquement.
+- Le moteur est auto-installe au premier usage si besoin, puis reutilise localement.

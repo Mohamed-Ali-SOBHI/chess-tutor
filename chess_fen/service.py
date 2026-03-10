@@ -12,20 +12,29 @@ from .constants import (
     EXCLUDED_IMAGE_DIRS,
     IGNORED_IMAGE_PREFIXES,
     IMAGE_EXTENSIONS,
+    MIN_RELIABLE_CONFIDENCE,
+    MIN_RELIABLE_CONFIDENCE_WITH_STRONG_STABILITY,
+    MIN_RELIABLE_QUALITY,
+    MIN_RELIABLE_STABILITY,
+    MIN_RELIABLE_STRONG_STABILITY,
 )
 from .engine import get_best_move_from_fen
 from .fen_utils import _to_full_fen
 from .predictor import _predict_best_fen
+from .torch_runtime import optimize_predictor_runtime, warmup_predictor_runtime
 from .vision import detect_and_crop_board, detect_and_crop_board_from_image
 
 
 def _load_predictor():
     model_path = download_pretrained_model()
-    return ChessPositionPredictor(
+    predictor = ChessPositionPredictor(
         model_path=model_path,
         classifier=DEFAULT_CLASSIFIER,
         verbose=False,
     )
+    optimize_predictor_runtime(predictor)
+    warmup_predictor_runtime(predictor)
+    return predictor
 
 
 def _load_board_image(image_path):
@@ -51,17 +60,75 @@ def _build_prediction_result(source_label, board_image, fen, meta):
     }
 
 
-def _predict_board_image(board_image, predictor, use_filters, source_label):
+def _get_prediction_reliability(prediction_result):
+    quality_score = int(prediction_result.get("quality_score") or 0)
+    avg_confidence = float(prediction_result.get("avg_confidence") or 0.0)
+    stability_count = int(prediction_result.get("stability_count") or 0)
+    fallback_used = bool(prediction_result.get("fallback_used"))
+    fen = (prediction_result.get("fen") or "").strip()
+
+    meets_baseline_confidence = avg_confidence >= MIN_RELIABLE_CONFIDENCE
+    meets_strong_stability_confidence = (
+        stability_count >= MIN_RELIABLE_STRONG_STABILITY
+        and avg_confidence >= MIN_RELIABLE_CONFIDENCE_WITH_STRONG_STABILITY
+    )
+
+    reasons = []
+    if not fen:
+        reasons.append("aucun FEN detecte")
+    if quality_score < MIN_RELIABLE_QUALITY:
+        reasons.append(
+            f"qualite trop faible ({quality_score} < {MIN_RELIABLE_QUALITY})"
+        )
+    if not (meets_baseline_confidence or meets_strong_stability_confidence):
+        reasons.append(
+            "confiance trop faible "
+            f"({avg_confidence:.3f} < {MIN_RELIABLE_CONFIDENCE:.3f})"
+        )
+    if stability_count < MIN_RELIABLE_STABILITY:
+        reasons.append(
+            f"stabilite insuffisante ({stability_count} < {MIN_RELIABLE_STABILITY})"
+        )
+    if fallback_used:
+        reasons.append("mode fallback")
+
+    is_reliable = not reasons
+    if is_reliable:
+        message = "FEN fiable"
+    else:
+        message = "FEN non fiable: " + ", ".join(reasons)
+
+    return {
+        "is_reliable": is_reliable,
+        "message": message,
+        "reasons": reasons,
+    }
+
+
+def _predict_board_image(
+    board_image,
+    predictor,
+    use_filters,
+    source_label,
+    progress_callback=None,
+):
     if board_image is None:
         raise RuntimeError("Impossible de charger l'image du plateau")
 
-    fen, meta = _predict_best_fen(board_image, predictor, use_filters=use_filters)
-    return _build_prediction_result(
+    fen, meta = _predict_best_fen(
+        board_image,
+        predictor,
+        use_filters=use_filters,
+        progress_callback=progress_callback,
+    )
+    result = _build_prediction_result(
         source_label=source_label,
         board_image=board_image,
         fen=fen,
         meta=meta,
     )
+    result.update(_get_prediction_reliability(result))
+    return result
 
 
 def analyze_board_image(
@@ -69,6 +136,7 @@ def analyze_board_image(
     predictor=None,
     use_filters=True,
     source_label="board_image",
+    progress_callback=None,
 ):
     predictor = predictor or _load_predictor()
     normalized_image = board_image.convert("RGB")
@@ -77,6 +145,7 @@ def analyze_board_image(
         predictor=predictor,
         use_filters=use_filters,
         source_label=source_label,
+        progress_callback=progress_callback,
     )
 
 
@@ -84,6 +153,7 @@ def analyze_image(
     image_path,
     predictor=None,
     use_filters=True,
+    progress_callback=None,
 ):
     predictor = predictor or _load_predictor()
     board_image, board_image_message = _load_board_image(image_path)
@@ -95,6 +165,7 @@ def analyze_image(
         predictor=predictor,
         use_filters=use_filters,
         source_label=image_path,
+        progress_callback=progress_callback,
     )
     result["image_path"] = image_path
     result["board_image_message"] = board_image_message
@@ -106,6 +177,7 @@ def analyze_screen_image(
     predictor=None,
     use_filters=True,
     source_label="screen_capture.png",
+    progress_callback=None,
 ):
     predictor = predictor or _load_predictor()
     board_image = detect_and_crop_board_from_image(
@@ -120,6 +192,7 @@ def analyze_screen_image(
         predictor=predictor,
         use_filters=use_filters,
         source_label=source_label,
+        progress_callback=progress_callback,
     )
 
 
@@ -129,13 +202,23 @@ def _attach_move_recommendation(
     side_to_move,
     think_time,
     engine_elo,
+    progress_callback=None,
 ):
     result = dict(prediction_result)
     fen = result["fen"]
+    reliability = {
+        "is_reliable": bool(result.get("is_reliable")),
+        "message": result.get("message"),
+        "reasons": result.get("reasons"),
+    }
+    if not reliability["message"]:
+        reliability = _get_prediction_reliability(result)
+        result.update(reliability)
 
-    if not fen:
+    if not fen or not reliability["is_reliable"]:
         result.update(
             {
+                "side_to_move": side_to_move,
                 "best_move_uci": "",
                 "best_move_san": "",
                 "score_cp": None,
@@ -152,10 +235,12 @@ def _attach_move_recommendation(
         side_to_move=side_to_move,
         think_time=think_time,
         engine_elo=engine_elo,
+        progress_callback=progress_callback,
     )
 
     result.update(
         {
+            "side_to_move": move_info["side_to_move"],
             "best_move_uci": move_info["best_move_uci"],
             "best_move_san": move_info["best_move_san"],
             "score_cp": move_info["score_cp"],
@@ -175,11 +260,14 @@ def analyze_image_and_suggest_move(
     use_filters=True,
     engine_elo=DEFAULT_ENGINE_ELO,
     predictor=None,
+    progress_callback=None,
+    engine_progress_callback=None,
 ):
     prediction_result = analyze_image(
         image_path,
         predictor=predictor,
         use_filters=use_filters,
+        progress_callback=progress_callback,
     )
     return _attach_move_recommendation(
         prediction_result=prediction_result,
@@ -187,6 +275,7 @@ def analyze_image_and_suggest_move(
         side_to_move=side_to_move,
         think_time=think_time,
         engine_elo=engine_elo,
+        progress_callback=engine_progress_callback,
     )
 
 
@@ -199,12 +288,15 @@ def analyze_screen_image_and_suggest_move(
     engine_elo=DEFAULT_ENGINE_ELO,
     predictor=None,
     source_label="screen_capture.png",
+    progress_callback=None,
+    engine_progress_callback=None,
 ):
     prediction_result = analyze_screen_image(
         screen_image,
         predictor=predictor,
         use_filters=use_filters,
         source_label=source_label,
+        progress_callback=progress_callback,
     )
     return _attach_move_recommendation(
         prediction_result=prediction_result,
@@ -212,6 +304,7 @@ def analyze_screen_image_and_suggest_move(
         side_to_move=side_to_move,
         think_time=think_time,
         engine_elo=engine_elo,
+        progress_callback=engine_progress_callback,
     )
 
 

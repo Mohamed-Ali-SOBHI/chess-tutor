@@ -5,8 +5,10 @@ from tkinter import filedialog, ttk
 
 from .capture import capture_full_screen
 from .constants import DEFAULT_ENGINE_ELO
-from .engine import get_best_move_from_fen
-from .service import _load_predictor, analyze_screen_image
+from .service import (
+    _load_predictor,
+    analyze_screen_image_and_suggest_move,
+)
 
 
 class ChessAssistantApp:
@@ -23,11 +25,14 @@ class ChessAssistantApp:
         self.status_var = tk.StringVar(
             value="Pret. Clique sur le bouton pour capturer l'ecran et analyser le plateau."
         )
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_text_var = tk.StringVar(value="0%")
         self.fen_var = tk.StringVar(value="-")
         self.best_move_var = tk.StringVar(value="-")
         self.eval_var = tk.StringVar(value="-")
         self.metrics_var = tk.StringVar(value="-")
         self.engine_var = tk.StringVar(value="-")
+        self.runtime_var = tk.StringVar(value="-")
 
         self._build_layout()
 
@@ -36,22 +41,26 @@ class ChessAssistantApp:
         main_frame.grid(row=0, column=0, sticky="nsew")
         main_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(main_frame, text="Stockfish").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(main_frame, text="Stockfish").grid(row=0, column=0, sticky="w", pady=(0, 4))
         stockfish_entry = ttk.Entry(
             main_frame,
             textvariable=self.stockfish_var,
             width=52,
         )
-        stockfish_entry.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        stockfish_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
         ttk.Button(
             main_frame,
             text="Parcourir",
             command=self._browse_stockfish,
-        ).grid(row=0, column=2, padx=(8, 0), pady=(0, 8))
+        ).grid(row=0, column=2, padx=(8, 0), pady=(0, 4))
+        ttk.Label(
+            main_frame,
+            text="Optionnel. Laisse vide pour installer Stockfish automatiquement.",
+        ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 12))
 
-        ttk.Label(main_frame, text="Trait").grid(row=1, column=0, sticky="w", pady=(0, 12))
+        ttk.Label(main_frame, text="Trait").grid(row=2, column=0, sticky="w", pady=(0, 12))
         side_frame = ttk.Frame(main_frame)
-        side_frame.grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 12))
+        side_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=(0, 12))
         ttk.Radiobutton(
             side_frame,
             text="Blancs",
@@ -70,63 +79,86 @@ class ChessAssistantApp:
             text="Capturer l'ecran et recommander",
             command=self._start_analysis,
         )
-        self.analyze_button.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        self.analyze_button.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+
+        self.progress_bar = ttk.Progressbar(
+            main_frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            variable=self.progress_var,
+        )
+        self.progress_bar.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        ttk.Label(
+            main_frame,
+            textvariable=self.progress_text_var,
+            width=6,
+            anchor="e",
+        ).grid(row=4, column=2, sticky="e", pady=(0, 4))
 
         ttk.Separator(main_frame, orient="horizontal").grid(
-            row=3,
+            row=5,
             column=0,
             columnspan=3,
             sticky="ew",
             pady=(0, 12),
         )
 
-        ttk.Label(main_frame, text="Statut").grid(row=4, column=0, sticky="nw", pady=(0, 8))
+        ttk.Label(main_frame, text="Statut").grid(row=6, column=0, sticky="nw", pady=(0, 8))
         ttk.Label(
             main_frame,
             textvariable=self.status_var,
             wraplength=520,
             justify="left",
-        ).grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 8))
 
-        ttk.Label(main_frame, text="FEN").grid(row=5, column=0, sticky="nw", pady=(0, 8))
+        ttk.Label(main_frame, text="FEN").grid(row=7, column=0, sticky="nw", pady=(0, 8))
         ttk.Label(
             main_frame,
             textvariable=self.fen_var,
             wraplength=520,
             justify="left",
-        ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=7, column=1, columnspan=2, sticky="w", pady=(0, 8))
 
-        ttk.Label(main_frame, text="Meilleur coup").grid(row=6, column=0, sticky="nw", pady=(0, 8))
+        ttk.Label(main_frame, text="Meilleur coup").grid(row=8, column=0, sticky="nw", pady=(0, 8))
         ttk.Label(
             main_frame,
             textvariable=self.best_move_var,
             wraplength=520,
             justify="left",
-        ).grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=8, column=1, columnspan=2, sticky="w", pady=(0, 8))
 
-        ttk.Label(main_frame, text="Evaluation").grid(row=7, column=0, sticky="nw", pady=(0, 8))
+        ttk.Label(main_frame, text="Evaluation").grid(row=9, column=0, sticky="nw", pady=(0, 8))
         ttk.Label(
             main_frame,
             textvariable=self.eval_var,
             wraplength=520,
             justify="left",
-        ).grid(row=7, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=9, column=1, columnspan=2, sticky="w", pady=(0, 8))
 
-        ttk.Label(main_frame, text="Qualite").grid(row=8, column=0, sticky="nw", pady=(0, 8))
+        ttk.Label(main_frame, text="Qualite").grid(row=10, column=0, sticky="nw", pady=(0, 8))
         ttk.Label(
             main_frame,
             textvariable=self.metrics_var,
             wraplength=520,
             justify="left",
-        ).grid(row=8, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=10, column=1, columnspan=2, sticky="w", pady=(0, 8))
 
-        ttk.Label(main_frame, text="Moteur").grid(row=9, column=0, sticky="nw")
+        ttk.Label(main_frame, text="Moteur").grid(row=11, column=0, sticky="nw", pady=(0, 8))
         ttk.Label(
             main_frame,
             textvariable=self.engine_var,
             wraplength=520,
             justify="left",
-        ).grid(row=9, column=1, columnspan=2, sticky="w")
+        ).grid(row=11, column=1, columnspan=2, sticky="w", pady=(0, 8))
+
+        ttk.Label(main_frame, text="Inference").grid(row=12, column=0, sticky="nw")
+        ttk.Label(
+            main_frame,
+            textvariable=self.runtime_var,
+            wraplength=520,
+            justify="left",
+        ).grid(row=12, column=1, columnspan=2, sticky="w")
 
     def _browse_stockfish(self):
         selected_path = filedialog.askopenfilename(
@@ -144,74 +176,117 @@ class ChessAssistantApp:
     def _set_status(self, message):
         self.root.after(0, lambda: self.status_var.set(message))
 
+    def _set_progress(self, value, text=None):
+        bounded_value = max(0.0, min(100.0, float(value)))
+
+        def _apply():
+            self.progress_var.set(bounded_value)
+            if text is None:
+                self.progress_text_var.set(f"{bounded_value:.0f}%")
+            else:
+                self.progress_text_var.set(text)
+
+        self.root.after(0, _apply)
+
+    def _handle_fen_progress(self, payload):
+        total = max(1, int(payload.get("total") or 1))
+        current = max(0, int(payload.get("current") or 0))
+        ratio = min(1.0, current / total)
+        progress_value = 20.0 + 65.0 * ratio
+        message = payload.get("message") or "Analyse du FEN..."
+        self._set_status(message)
+        self._set_progress(progress_value)
+
     def _start_analysis(self):
         if self.is_busy:
             return
 
         self._set_busy(True)
         self.status_var.set("Initialisation de l'analyse...")
+        self.progress_var.set(0.0)
+        self.progress_text_var.set("0%")
         self.best_move_var.set("-")
         self.eval_var.set("-")
         self.engine_var.set("-")
+        self.runtime_var.set("-")
         threading.Thread(target=self._run_analysis, daemon=True).start()
 
     def _ensure_predictor(self):
         if self.predictor is None:
             self._set_status("Chargement du modele de reconnaissance...")
+            self._set_progress(5.0)
             self.predictor = _load_predictor()
+            runtime_label = getattr(
+                self.predictor,
+                "runtime_device_label",
+                getattr(self.predictor, "device", "CPU"),
+            )
+            self.root.after(0, lambda: self.runtime_var.set(str(runtime_label)))
         return self.predictor
 
     def _run_analysis(self):
         try:
             predictor = self._ensure_predictor()
             self._set_status("Capture de l'ecran en cours...")
+            self._set_progress(10.0)
             screen_image = capture_full_screen()
-            self._set_status("Detection du plateau et extraction du FEN...")
-            analysis = analyze_screen_image(
+            self._set_status("Detection du plateau...")
+            self._set_progress(15.0)
+            analysis = analyze_screen_image_and_suggest_move(
                 screen_image,
+                stockfish_path=self.stockfish_var.get().strip() or None,
+                side_to_move=self.side_to_move_var.get(),
+                think_time=0.20,
+                engine_elo=DEFAULT_ENGINE_ELO,
                 predictor=predictor,
                 use_filters=True,
                 source_label="full_screen_capture.png",
+                progress_callback=self._handle_fen_progress,
+                engine_progress_callback=self._set_status,
             )
 
             engine_message = "Stockfish non configure"
             move_message = "Aucun coup"
             eval_message = "Aucune evaluation"
+            final_status = "Analyse terminee."
 
             fen = analysis["fen"]
-            if fen:
-                try:
-                    self._set_status("Calcul du meilleur coup...")
-                    move_info = get_best_move_from_fen(
-                        fen,
-                        stockfish_path=self.stockfish_var.get().strip() or None,
-                        side_to_move=self.side_to_move_var.get(),
-                        think_time=0.20,
-                        engine_elo=DEFAULT_ENGINE_ELO,
-                    )
-                    move_message = (
-                        f"{move_info['best_move_san']} "
-                        f"({move_info['best_move_uci']})"
-                    )
-                    if move_info["mate_in"] is not None:
-                        eval_message = f"Mat en {move_info['mate_in']}"
-                    elif move_info["score_cp"] is not None:
-                        eval_message = f"{move_info['score_cp']} centipions"
-                    else:
-                        eval_message = "Evaluation indisponible"
+            is_reliable = bool(analysis.get("is_reliable"))
+            if fen and is_reliable:
+                side_label = "Blancs" if analysis["side_to_move"] == "w" else "Noirs"
+                move_message = (
+                    f"{side_label}: {analysis['best_move_san']} "
+                    f"({analysis['best_move_uci']})"
+                )
+                if analysis["mate_in"] is not None:
+                    eval_message = f"Mat en {analysis['mate_in']}"
+                elif analysis["score_cp"] is not None:
+                    eval_message = f"{analysis['score_cp']} centipions"
+                else:
+                    eval_message = "Evaluation indisponible"
 
-                    engine_path = move_info.get("stockfish_path") or ""
-                    engine_elo = move_info.get("engine_elo")
-                    if engine_elo is None:
-                        engine_message = engine_path or "Stockfish actif"
-                    else:
-                        engine_message = f"{engine_path} | Elo {engine_elo}"
-                except Exception as error:
-                    engine_message = str(error)
-                    move_message = "Impossible de calculer le coup"
-                    eval_message = "Moteur indisponible"
+                engine_path = analysis.get("stockfish_path") or ""
+                engine_elo = analysis.get("engine_elo")
+                if engine_path and not self.stockfish_var.get().strip():
+                    self.root.after(0, lambda: self.stockfish_var.set(engine_path))
+                if engine_elo is None:
+                    engine_message = engine_path or "Stockfish actif"
+                else:
+                    engine_message = f"{engine_path} | Elo {engine_elo}"
+            elif fen:
+                move_message = "Aucun coup: FEN non fiable"
+                eval_message = "Verification manuelle requise"
+                engine_message = "Moteur non lance"
+                final_status = analysis.get(
+                    "message",
+                    "Extraction du FEN non fiable, aucun coup calcule.",
+                )
             else:
                 engine_message = "Aucun FEN detecte, moteur non lance"
+                final_status = analysis.get(
+                    "message",
+                    "Aucun FEN detecte, moteur non lance.",
+                )
 
             self.root.after(
                 0,
@@ -220,28 +295,47 @@ class ChessAssistantApp:
                     move_message=move_message,
                     eval_message=eval_message,
                     engine_message=engine_message,
+                    final_status=final_status,
                 ),
             )
         except Exception as error:
             self.root.after(0, lambda: self._show_error(str(error)))
 
-    def _finish_analysis(self, analysis, move_message, eval_message, engine_message):
-        self.fen_var.set(analysis["fen"] or "Aucun FEN detecte")
+    def _finish_analysis(
+        self,
+        analysis,
+        move_message,
+        eval_message,
+        engine_message,
+        final_status,
+    ):
+        fen = (analysis.get("fen") or "").strip()
+        if fen and not analysis.get("is_reliable"):
+            fen_display = f"A verifier: {fen}"
+        else:
+            fen_display = fen or "Aucun FEN detecte"
+
+        self.fen_var.set(fen_display)
         self.best_move_var.set(move_message)
         self.eval_var.set(eval_message)
         self.metrics_var.set(
-            "qualite={quality} | confiance={confidence:.3f} | stabilite={stability}".format(
+            "qualite={quality} | confiance={confidence:.3f} | stabilite={stability} | fiable={reliable}".format(
                 quality=analysis["quality_score"],
                 confidence=analysis["avg_confidence"],
                 stability=analysis["stability_count"],
+                reliable="oui" if analysis.get("is_reliable") else "non",
             )
         )
         self.engine_var.set(engine_message)
-        self.status_var.set("Analyse terminee.")
+        self.status_var.set(final_status)
+        self.progress_var.set(100.0)
+        self.progress_text_var.set("100%")
         self._set_busy(False)
 
     def _show_error(self, message):
         self.status_var.set(f"Erreur: {message}")
+        self.progress_var.set(0.0)
+        self.progress_text_var.set("0%")
         self._set_busy(False)
 
 
