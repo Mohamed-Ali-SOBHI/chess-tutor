@@ -1,0 +1,5 @@
+chessimg2pos
+python-chess
+pillow
+opencv-python
+numpy
